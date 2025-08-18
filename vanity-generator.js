@@ -1,7 +1,7 @@
 const { Worker, isMainThread, parentPort, workerData } = require("worker_threads");
-const { secp256k1 } = require("@noble/secp256k1");
-const { keccak_256 } = require("@noble/hashes/sha3");
 const { randomBytes } = require("crypto");
+const secp256k1 = require("secp256k1");
+const { keccak256 } = require("js-sha3");
 const fs = require("fs");
 const os = require("os");
 
@@ -24,23 +24,23 @@ function calculateProbability(prefix, suffix) {
   return prefixProbability * suffixProbability;
 }
 
-// Generate Ethereum address from private key using noble-secp256k1
+// Generate Ethereum address from private key using secp256k1 + js-sha3
 function generateAddressFromPrivateKey(privateKey) {
-  // Get public key from private key
-  const publicKey = secp256k1.getPublicKey(privateKey, false); // uncompressed
+  // Get public key from private key (uncompressed format)
+  const publicKey = secp256k1.publicKeyCreate(privateKey, false);
   
   // Remove the 0x04 prefix for uncompressed key, keep only x,y coordinates
   const publicKeyBytes = publicKey.slice(1);
   
   // Hash with Keccak-256
-  const hash = keccak_256(publicKeyBytes);
+  const hash = Buffer.from(keccak256.arrayBuffer(publicKeyBytes));
   
   // Take last 20 bytes as address
   const address = hash.slice(-20);
   
   return {
-    address: '0x' + Buffer.from(address).toString('hex'),
-    privateKey: '0x' + Buffer.from(privateKey).toString('hex')
+    address: '0x' + address.toString('hex'),
+    privateKey: '0x' + privateKey.toString('hex')
   };
 }
 
@@ -53,7 +53,7 @@ if (isMainThread) {
   const numWorkers = Math.min(getFlagValue("maxWorker", os.cpus().length), os.cpus().length);
   const walletCount = getFlagValue("count", 1);
 
-  console.log(`🔎 Searching vanity address with @noble/secp256k1...`);
+  console.log(`🔎 Searching vanity address with secp256k1...`);
   console.log(`   Prefix: ${prefix}`);
   console.log(`   Suffix: ${suffix}`);
   console.log(`   Expected tries (per wallet): ~${expectedTries.toLocaleString()}`);
@@ -141,8 +141,8 @@ PrivateKey: ${msg.privateKey}
     });
   }
 
-  // Updated initial rate estimate for noble-secp256k1 (typically 3-5x faster than ethers)
-  const initialRate = 6000 * numWorkers; // More realistic estimate for noble-secp256k1
+  // Updated initial rate estimate for secp256k1 (typically 5-10x faster than ethers)
+  const initialRate = 8000 * numWorkers; // More realistic estimate for secp256k1
   const initialEta = expectedTries / initialRate;
   console.log(`⏳ Initial ETA estimate: ~${formatTime(initialEta)}\n`);
 
@@ -154,9 +154,12 @@ PrivateKey: ${msg.privateKey}
 
   while (true) {
     // Generate random 32-byte private key
-    const privateKey = randomBytes(32);
+    let privateKey;
+    do {
+      privateKey = randomBytes(32);
+    } while (!secp256k1.privateKeyVerify(privateKey));
     
-    // Generate address using noble-secp256k1
+    // Generate address using secp256k1
     const wallet = generateAddressFromPrivateKey(privateKey);
     const addr = wallet.address.toLowerCase();
     tries++;
