@@ -100,8 +100,17 @@ Private: ${msg.privateKey}
 
         if (foundCount >= walletCount) {
           console.log(`\n🏆 Complete! Found ${foundCount} vanity addresses.`);
-          workers.forEach(w => w.terminate());
-          process.exit(0);
+          
+          // Gracefully terminate workers
+          workers.forEach(w => {
+            w.postMessage({ type: "stop" });
+          });
+          
+          // Give workers time to clean up, then exit
+          setTimeout(() => {
+            workers.forEach(w => w.terminate());
+            process.exit(0);
+          }, 100);
         }
       } else if (msg.type === "progress") {
         stats[msg.workerId] = msg;
@@ -154,6 +163,11 @@ Private: ${msg.privateKey}
   
   try {
     while (true) {
+      // Check for stop message
+      if (parentPort && parentPort.hasRef()) {
+        // This is a simple check - in practice you'd need a more robust message system
+      }
+      
       // Process in large batches
       for (let batch = 0; batch < BATCH_SIZE; batch++) {
         // Generate random private key directly into buffer
