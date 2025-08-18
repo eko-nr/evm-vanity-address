@@ -17,7 +17,7 @@ A high-performance, multi-threaded Ethereum vanity address generator built with 
 
 2. **Install dependencies:**
 ```bash
-npm install ethers
+npm install
 ```
 
 3. **Make sure you have Node.js 12+ installed** (required for worker threads support)
