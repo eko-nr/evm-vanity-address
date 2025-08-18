@@ -3,48 +3,9 @@ const { randomBytes } = require("crypto");
 const fs = require("fs");
 const os = require("os");
 
-// Try multiple libraries in order of performance
-let secp256k1, keccak256;
-
-try {
-  // First try: WebAssembly version (fastest for JS)
-  const secp = require("@bitcoinerlab/secp256k1");
-  const { keccak_256 } = require("@noble/hashes/sha3");
-  secp256k1 = {
-    getPublicKey: secp.getPublicKey,
-    utils: { isValidPrivateKey: secp.utils.isValidPrivateKey }
-  };
-  keccak256 = (data) => keccak_256(data);
-  console.log("✅ Using @bitcoinerlab/secp256k1 (WASM) - Expected: ~20,000/s per worker");
-} catch (e1) {
-  try {
-    // Second try: @scure optimized version
-    const secp = require("@scure/secp256k1");
-    const { keccak_256 } = require("@noble/hashes/sha3");
-    secp256k1 = {
-      getPublicKey: secp.getPublicKey,
-      utils: { isValidPrivateKey: secp.utils.isValidPrivateKey }
-    };
-    keccak256 = (data) => keccak_256(data);
-    console.log("✅ Using @scure/secp256k1 - Expected: ~15,000/s per worker");
-  } catch (e2) {
-    try {
-      // Third try: Native bindings
-      const secp = require("secp256k1");
-      const { keccak256: keccak } = require("js-sha3");
-      secp256k1 = {
-        getPublicKey: (key) => secp.publicKeyCreate(key, false),
-        utils: { isValidPrivateKey: secp.privateKeyVerify }
-      };
-      keccak256 = (data) => Buffer.from(keccak.arrayBuffer(data));
-      console.log("✅ Using secp256k1 (native)");
-    } catch (e3) {
-      // Fallback to ethers
-      console.log("⚠️  Falling back to ethers");
-      console.log("Install faster libs: npm install @bitcoinerlab/secp256k1 @noble/hashes");
-    }
-  }
-}
+// Use native secp256k1 + js-sha3 for maximum performance
+const secp256k1 = require("secp256k1");
+const { keccak256 } = require("js-sha3");
 
 function getFlagValue(flagName, defaultValue) {
   const arg = process.argv.find(a => a.startsWith(`--${flagName}=`));
@@ -61,50 +22,48 @@ function calculateProbability(prefix, suffix) {
   return prefixProbability * suffixProbability;
 }
 
-// Ultra-optimized address generation
-function generateAddressFromPrivateKey(privateKey) {
-  if (!secp256k1) {
-    // Fallback to ethers
-    const ethers = require("ethers");
-    const wallet = new ethers.Wallet(privateKey);
-    return {
-      address: wallet.address,
-      privateKey: wallet.privateKey
-    };
-  }
-
-  // Get uncompressed public key
-  const publicKey = secp256k1.getPublicKey(privateKey, false);
+// Ultra-optimized single method using native secp256k1
+function generateVanityAddress(privateKeyBuffer) {
+  // Get uncompressed public key (65 bytes with 0x04 prefix)
+  const publicKey = secp256k1.publicKeyCreate(privateKeyBuffer, false);
   
-  // Remove 0x04 prefix, hash with Keccak-256
+  // Remove 0x04 prefix and hash with Keccak-256
   const publicKeyBytes = publicKey.slice(1);
-  const hash = keccak256(publicKeyBytes);
+  const hash = keccak256.arrayBuffer(publicKeyBytes);
   
   // Last 20 bytes = address
-  const address = hash.slice(-20);
+  const addressBytes = new Uint8Array(hash).slice(-20);
   
   return {
-    address: '0x' + Buffer.from(address).toString('hex'),
-    privateKey: '0x' + Buffer.from(privateKey).toString('hex')
+    address: '0x' + Buffer.from(addressBytes).toString('hex'),
+    privateKey: '0x' + privateKeyBuffer.toString('hex')
   };
 }
 
-// Pre-allocate for better performance (removed unused buffer)
-// const PRIVATE_KEY_BUFFER = Buffer.alloc(32); // Not needed anymore
+// Pre-compile regex for faster matching
+function createMatcher(prefix, suffix) {
+  const prefixRegex = new RegExp(`^0x${prefix}`, 'i');
+  const suffixRegex = suffix ? new RegExp(`${suffix}$`, 'i') : null;
+  
+  return (address) => {
+    return prefixRegex.test(address) && (!suffixRegex || suffixRegex.test(address));
+  };
+}
 
 if (isMainThread) {
   const prefix = (process.argv[2] || "00").toLowerCase();
   const suffix = (process.argv[3] || "dead").toLowerCase();
 
   const expectedTries = calculateProbability(prefix, suffix);
-  const numWorkers = Math.min(getFlagValue("maxWorker", os.cpus().length * 2), os.cpus().length * 2);
+  const numWorkers = getFlagValue("maxWorker", os.cpus().length);
   const walletCount = getFlagValue("count", 1);
 
-  console.log(`🚀 Ultra-Fast Vanity Address Generator`);
+  console.log(`🚀 Ultra-Fast Vanity Generator (Native secp256k1)`);
+  console.log(`   Library: secp256k1 (native) + js-sha3`);
   console.log(`   Prefix: ${prefix}`);
   console.log(`   Suffix: ${suffix}`);
   console.log(`   Expected tries: ~${expectedTries.toLocaleString()}`);
-  console.log(`🖥  Using ${numWorkers} workers (2x CPU cores for max performance)`);
+  console.log(`🖥  Using ${numWorkers} workers`);
   
   let foundCount = 0;
   const workers = [];
@@ -141,6 +100,7 @@ Private: ${msg.privateKey}
 
         if (foundCount >= walletCount) {
           console.log(`\n🏆 Complete! Found ${foundCount} vanity addresses.`);
+          workers.forEach(w => w.terminate());
           process.exit(0);
         }
       } else if (msg.type === "progress") {
@@ -165,69 +125,83 @@ Private: ${msg.privateKey}
         );
       }
     });
+
+    worker.on("error", (error) => {
+      console.error(`Worker ${i} error:`, error);
+    });
   }
 
-  // Estimate based on library being used
-  const estimatedRate = secp256k1 ? 15000 * numWorkers : 2000 * numWorkers;
+  // Optimistic estimate with native libraries
+  const estimatedRate = 25000 * numWorkers; // Native is fastest
   const estimatedTime = expectedTries / estimatedRate;
   console.log(`⏱️  Estimated time: ~${estimatedTime < 3600 ? (estimatedTime/60).toFixed(1) + 'm' : (estimatedTime/3600).toFixed(1) + 'h'}`);
   console.log(`🔥 Starting generation...\n`);
 
 } else {
-  // WORKER THREAD - Ultra optimized
+  // WORKER THREAD - Maximum optimization
   const { prefix, suffix, id } = workerData;
   let tries = 0;
   const start = Date.now();
-
-  // Batch processing for better performance
-  const BATCH_SIZE = 1000;
   
-  while (true) {
-    // Process in batches to reduce message overhead
-    for (let batch = 0; batch < BATCH_SIZE; batch++) {
-      // Generate random private key
-      const privateKey = randomBytes(32);
-      
-      // Skip invalid keys (very rare)
-      if (secp256k1 && secp256k1.utils && !secp256k1.utils.isValidPrivateKey(privateKey)) {
-        continue;
-      }
-      
-      const wallet = generateAddressFromPrivateKey(privateKey);
-      const addr = wallet.address.toLowerCase();
-      tries++;
+  // Pre-compile matcher for this worker
+  const isMatch = createMatcher(prefix, suffix);
+  
+  // Large batch size for fewer interruptions
+  const BATCH_SIZE = 2000;
+  
+  // Pre-allocate buffer for reuse
+  const privateKeyBuffer = Buffer.alloc(32);
+  
+  try {
+    while (true) {
+      // Process in large batches
+      for (let batch = 0; batch < BATCH_SIZE; batch++) {
+        // Generate random private key directly into buffer
+        randomBytes(32).copy(privateKeyBuffer);
+        
+        // Skip invalid private keys (very rare but necessary for native lib)
+        if (!secp256k1.privateKeyVerify(privateKeyBuffer)) {
+          continue;
+        }
+        
+        const wallet = generateVanityAddress(privateKeyBuffer);
+        tries++;
 
-      const hasPrefix = addr.startsWith("0x" + prefix);
-      const hasSuffix = !suffix || addr.endsWith(suffix);
-      
-      if (hasPrefix && hasSuffix) {
+        if (isMatch(wallet.address)) {
+          const elapsed = (Date.now() - start) / 1000;
+          const rate = tries / elapsed;
+
+          parentPort.postMessage({
+            type: "found",
+            workerId: id,
+            tries,
+            elapsed,
+            rate,
+            address: wallet.address,
+            privateKey: wallet.privateKey,
+          });
+          return;
+        }
+      }
+
+      // Report progress less frequently
+      if (tries % 10000 === 0) {
         const elapsed = (Date.now() - start) / 1000;
         const rate = tries / elapsed;
-
         parentPort.postMessage({
-          type: "found",
+          type: "progress",
           workerId: id,
           tries,
           elapsed,
           rate,
-          address: wallet.address,
-          privateKey: wallet.privateKey,
         });
-        return; // Exit after finding
       }
     }
-
-    // Report progress every batch
-    if (tries % 5000 === 0) {
-      const elapsed = (Date.now() - start) / 1000;
-      const rate = tries / elapsed;
-      parentPort.postMessage({
-        type: "progress",
-        workerId: id,
-        tries,
-        elapsed,
-        rate,
-      });
-    }
+  } catch (error) {
+    parentPort.postMessage({
+      type: "error",
+      workerId: id,
+      error: error.message
+    });
   }
 }
