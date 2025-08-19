@@ -19,7 +19,7 @@ A high-performance, multi-threaded Ethereum vanity address generator built with 
 
 2. **Install dependencies:**
 ```bash
-npm install secp256k1 js-sha3
+npm install
 ```
 
 3. **Make sure you have Node.js 12+ installed** (required for worker threads support)
