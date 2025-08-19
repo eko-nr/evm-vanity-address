@@ -11,15 +11,49 @@ function getFlagValue(flagName, defaultValue) {
   const arg = process.argv.find(a => a.startsWith(`--${flagName}=`));
   if (arg) {
     const val = arg.split("=")[1];
-    return isNaN(val) ? defaultValue : parseInt(val, 10);
+    // Return as string for prefix/suffix, as number for numeric flags
+    return (typeof defaultValue === 'number' && !isNaN(val)) ? parseInt(val, 10) : val;
   }
   return defaultValue;
+}
+
+function getStringFlag(flagName, defaultValue = "") {
+  const arg = process.argv.find(a => a.startsWith(`--${flagName}=`));
+  return arg ? arg.split("=")[1] : defaultValue;
+}
+
+function showHelp() {
+  console.log(`
+🚀 Ultra-Fast Vanity Address Generator
+
+Usage: node vanity-generator.js [options]
+
+Options:
+  --prefix=VALUE        Address prefix (without 0x). Default: "00"
+  --suffix=VALUE        Address suffix. Default: "" (none)
+  --count=NUMBER        Number of addresses to generate. Default: 1
+  --maxWorker=NUMBER    Number of worker threads. Default: CPU count
+  --help               Show this help message
+
+Examples:
+  node vanity-generator.js --prefix=dead --suffix=beef
+  node vanity-generator.js --prefix=1337 --count=5
+  node vanity-generator.js --prefix=cafe --suffix=babe --maxWorker=8
+
+Note: Longer prefixes/suffixes take exponentially more time!
+`);
 }
 
 function calculateProbability(prefix, suffix) {
   const prefixProbability = Math.pow(16, prefix.length);
   const suffixProbability = suffix ? Math.pow(16, suffix.length) : 1;
   return prefixProbability * suffixProbability;
+}
+
+function validateHexString(str, name) {
+  if (!/^[0-9a-fA-F]*$/.test(str)) {
+    throw new Error(`${name} must contain only hexadecimal characters (0-9, a-f, A-F)`);
+  }
 }
 
 // Ultra-optimized single method using native secp256k1
@@ -51,24 +85,67 @@ function createMatcher(prefix, suffix) {
 }
 
 if (isMainThread) {
-  const prefix = (process.argv[2] || "00").toLowerCase();
-  const suffix = (process.argv[3] || "dead").toLowerCase();
+  // Check for help flag
+  if (process.argv.includes('--help') || process.argv.includes('-h')) {
+    showHelp();
+    process.exit(0);
+  }
 
-  const expectedTries = calculateProbability(prefix, suffix);
+  // Parse command line flags
+  const prefix = (getStringFlag("prefix", "00")).toLowerCase();
+  const suffix = (getStringFlag("suffix", "")).toLowerCase();
   const numWorkers = getFlagValue("maxWorker", os.cpus().length);
   const walletCount = getFlagValue("count", 1);
 
+  // Validate inputs
+  try {
+    validateHexString(prefix, "Prefix");
+    if (suffix) validateHexString(suffix, "Suffix");
+    
+    if (prefix.length === 0) {
+      throw new Error("Prefix cannot be empty");
+    }
+    
+    if (prefix.length > 10) {
+      console.warn(`⚠️  Warning: Prefix length ${prefix.length} may take extremely long to find!`);
+    }
+    
+    if (suffix.length > 8) {
+      console.warn(`⚠️  Warning: Suffix length ${suffix.length} may take extremely long to find!`);
+    }
+
+    if (walletCount <= 0) {
+      throw new Error("Count must be greater than 0");
+    }
+
+    if (numWorkers <= 0 || numWorkers > 128) {
+      throw new Error("MaxWorker must be between 1 and 128");
+    }
+
+  } catch (error) {
+    console.error(`❌ Error: ${error.message}`);
+    console.log("Use --help for usage information");
+    process.exit(1);
+  }
+
+  const expectedTries = calculateProbability(prefix, suffix);
+
   console.log(`🚀 Ultra-Fast Vanity Generator (Native secp256k1)`);
   console.log(`   Library: secp256k1 (native) + js-sha3`);
-  console.log(`   Prefix: ${prefix}`);
-  console.log(`   Suffix: ${suffix}`);
-  console.log(`   Expected tries: ~${expectedTries.toLocaleString()}`);
+  console.log(`   Prefix: "${prefix}"`);
+  console.log(`   Suffix: "${suffix || 'none'}"`);
+  console.log(`   Count: ${walletCount}`);
+  console.log(`   Expected tries per address: ~${expectedTries.toLocaleString()}`);
   console.log(`🖥  Using ${numWorkers} workers`);
   
   let foundCount = 0;
   const workers = [];
   const stats = {};
   const start = Date.now();
+
+  // Create output filename with timestamp
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+  const outputFile = `vanity-results-${timestamp}.txt`;
 
   for (let i = 0; i < numWorkers; i++) {
     const worker = new Worker(__filename, {
@@ -79,27 +156,32 @@ if (isMainThread) {
     worker.on("message", (msg) => {
       if (msg.type === "found") {
         foundCount++;
+        const totalElapsed = (Date.now() - start) / 1000;
+        
         console.log(`\n🎯 FOUND! Wallet #${foundCount}`);
         console.log(`Worker: ${msg.workerId}, Tries: ${msg.tries.toLocaleString()}`);
-        console.log(`Time: ${msg.elapsed.toFixed(2)}s, Rate: ${msg.rate.toFixed(0)}/s`);
+        console.log(`Worker Time: ${msg.elapsed.toFixed(2)}s, Rate: ${msg.rate.toFixed(0)}/s`);
+        console.log(`Total Time: ${totalElapsed.toFixed(2)}s`);
         console.log(`Address: ${msg.address}`);
         console.log(`Private: ${msg.privateKey}`);
 
         const output = `
 🎯 Vanity Address #${foundCount}
+Generated: ${new Date().toISOString()}
 Prefix: ${prefix}, Suffix: ${suffix}
-Tries: ${msg.tries.toLocaleString()}
-Time: ${msg.elapsed.toFixed(2)}s
-Rate: ${msg.rate.toFixed(0)}/s
+Worker Tries: ${msg.tries.toLocaleString()}
+Worker Time: ${msg.elapsed.toFixed(2)}s
+Worker Rate: ${msg.rate.toFixed(0)}/s
+Total Time: ${totalElapsed.toFixed(2)}s
 Address: ${msg.address}
-Private: ${msg.privateKey}
+Private Key: ${msg.privateKey}
 ------------------------
 `;
-        fs.appendFileSync("ultra-results.txt", output);
-        console.log("💾 Saved to ultra-results.txt");
+        fs.appendFileSync(outputFile, output);
+        console.log(`💾 Saved to ${outputFile}`);
 
         if (foundCount >= walletCount) {
-          console.log(`\n🏆 Complete! Found ${foundCount} vanity addresses.`);
+          console.log(`\n🏆 Complete! Found ${foundCount} vanity addresses in ${totalElapsed.toFixed(2)}s.`);
           
           // Gracefully terminate workers
           workers.forEach(w => {
@@ -132,11 +214,19 @@ Private: ${msg.privateKey}
         process.stdout.write(
           `⚡ Tries: ${totalTries.toLocaleString()} | Rate: ${totalRate.toFixed(0)}/s | ETA: ${eta}     \r`
         );
+      } else if (msg.type === "error") {
+        console.error(`\n❌ Worker ${msg.workerId} error: ${msg.error}`);
       }
     });
 
     worker.on("error", (error) => {
-      console.error(`Worker ${i} error:`, error);
+      console.error(`❌ Worker ${i} error:`, error);
+    });
+
+    worker.on("exit", (code) => {
+      if (code !== 0) {
+        console.error(`❌ Worker ${i} stopped with exit code ${code}`);
+      }
     });
   }
 
@@ -146,10 +236,21 @@ Private: ${msg.privateKey}
   console.log(`⏱️  Estimated time: ~${estimatedTime < 3600 ? (estimatedTime/60).toFixed(1) + 'm' : (estimatedTime/3600).toFixed(1) + 'h'}`);
   console.log(`🔥 Starting generation...\n`);
 
+  // Handle graceful shutdown
+  process.on('SIGINT', () => {
+    console.log('\n🛑 Shutting down gracefully...');
+    workers.forEach(w => {
+      w.postMessage({ type: "stop" });
+      w.terminate();
+    });
+    process.exit(0);
+  });
+
 } else {
   // WORKER THREAD - Maximum optimization
   const { prefix, suffix, id } = workerData;
   let tries = 0;
+  let shouldStop = false;
   const start = Date.now();
   
   // Pre-compile matcher for this worker
@@ -161,15 +262,17 @@ Private: ${msg.privateKey}
   // Pre-allocate buffer for reuse
   const privateKeyBuffer = Buffer.alloc(32);
   
+  // Listen for stop messages
+  parentPort.on('message', (msg) => {
+    if (msg.type === 'stop') {
+      shouldStop = true;
+    }
+  });
+  
   try {
-    while (true) {
-      // Check for stop message
-      if (parentPort && parentPort.hasRef()) {
-        // This is a simple check - in practice you'd need a more robust message system
-      }
-      
+    while (!shouldStop) {
       // Process in large batches
-      for (let batch = 0; batch < BATCH_SIZE; batch++) {
+      for (let batch = 0; batch < BATCH_SIZE && !shouldStop; batch++) {
         // Generate random private key directly into buffer
         randomBytes(32).copy(privateKeyBuffer);
         
